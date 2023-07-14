@@ -1,0 +1,38 @@
+[tool.poetry]
+name = "transfer1"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+ir-datasets = "^0.5.4"
+python-terrier = "^0.9.2"
+torch = "^2.0.0"
+transformers = "^4.28.1"
+sentencepiece = "^0.1.98"
+faiss-cpu = "^1.7.4"
+
+
+[tool.poetry.group.dev.dependencies]
+jupyterlab = "^4.0.3"
+black = "^23.7.0"
+mypy = "^1.4.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 89
+
+[tool.mypy]
+show_error_context = true
+show_column_numbers = true
+ignore_missing_imports = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
