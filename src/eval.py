@@ -5,16 +5,8 @@ import sys
 from importlib import reload
 from pathlib import Path
 
-sys.path.append(
-    os.path.join(os.path.dirname(os.path.abspath("__file__")), "../datasets")
-)
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath("__file__")), ".."))
-
-os.environ["INDEX"] = "../indexes/ntcir17-transfer/jance"
-os.environ["RUN"] = "../runs/ntcir17-transfer/jance"
-
+import datasets.ntcir_transfer
 import ir_datasets
-import ntcir_transfer
 import pandas as pd
 import pyterrier as pt
 from models.jance.jance import PyTDenseIndexer, PyTDenseRetrieval
@@ -107,7 +99,7 @@ def main():
         dataset_pt,
         sudachi_tokenizer,
         Path("../indexes/ntcir17-transfer/debug/jance"),
-        os.getenv("RUN"),
+        "../runs/ntcir17-transfer/jance",
         tokenizer_mode=mode,
     )
     eval_result = evaluator.eval_on_dev()
