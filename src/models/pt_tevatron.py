@@ -16,63 +16,51 @@ import pyterrier as pt
 import torch
 from pyterrier.model import add_ranks
 from pyterrier.transformer import TransformerBase
+from tevatron.modeling import DenseModel
 from tqdm import tqdm
-
-from .JANCE.model.models import MSMarcoConfigDict
+from transformers import AutoConfig, AutoTokenizer, BertModel
 
 logger = getLogger(__name__)
 
 
-def load_model(checkpoint_path, device="cuda:0", cache_dir="debug"):
-    label_list = ["0", "1"]
-    num_labels = len(label_list)
-    model_type = "rdot_nll"
-    configObj = MSMarcoConfigDict[model_type]
-    config = configObj.config_class.from_pretrained(
-        checkpoint_path,
-        num_labels=num_labels,
-        finetuning_task="MSMarco",
-        cache_dir=cache_dir,
-    )
-    tokenizer = configObj.tokenizer_class.from_pretrained(
-        checkpoint_path,
-        do_lower_case=True,
-        cache_dir=cache_dir,
-    )
-    model = configObj.model_class.from_pretrained(
-        checkpoint_path,
-        from_tf=bool(".ckpt" in checkpoint_path),
-        config=config,
-        cache_dir=cache_dir,
-    )
-    model.to(device)
+def load_tevatron_model(
+    model_path: Union[str, Path], device: str = "cuda:0"
+) -> tuple[BertModel, AutoTokenizer]:
+    if isinstance(model_path, str):
+        model_path = Path(model_path)
 
-    return tokenizer, model
+    logger.info(f"loading encoder from {model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        "facebook/mcontriever-msmarco",
+    )
+    encoder = DenseModel.load(
+        model_name_or_path=model_path,
+    )
+    encoder = encoder.to(device)
+    encoder.eval()
+    return encoder, tokenizer
 
 
-class PyTDenseIndexer(TransformerBase):
+class TevatronIndexer(TransformerBase):
     def __init__(
         self,
         index_path: Path,
-        model_path: str = "k-ush/xlm-roberta-base-ance-en-jp-warmup",
+        model_path: str = "facebook/mcontriever",
         num_docs: Optional[int] = None,
         verbose: bool = True,
         segment_size: int = 500_000,
         device: str = "cuda:0",
+        batch_size: int = 16,
         **kwargs,
     ) -> None:
         if not torch.cuda.is_available():
             logger.warn("cuda is not avaliable. AnceEncoder use cpu as device")
             device = "cpu"
         self.index_path = index_path
-        cache_path = "/home/kush/Projects/NTCIR17/transfer1/models/jance/.cache"
         self.model_path = model_path
         self.device = device
 
-        tokenizer, model = load_model(self.model_path)
-        self.tokenizer = tokenizer
-        self.encoder = model
-
+        self.encoder, self.tokenizer = load_tevatron_model(self.model_path)
         self.max_length = 512
         self.query_max_length = 64
         self.verbose = verbose
@@ -80,10 +68,11 @@ class PyTDenseIndexer(TransformerBase):
         if self.verbose and self.num_docs is None:
             raise ValueError("if verbose=True, num_docs must be set")
         self.segment_size = segment_size
+        self.batch_size = batch_size
 
     def index(self, generator):
-        if self.index_path.joinpath("shards.pkl").exists():
-            return self.index_path
+        # if self.index_path.joinpath("shards.pkl").exists():
+        #     return self.index_path
 
         os.makedirs(self.index_path, exist_ok=True)
 
@@ -110,21 +99,14 @@ class PyTDenseIndexer(TransformerBase):
             print("Segment %d" % segment)
             docs = list(docs)
             passage_embedding = torch.tensor([])
-            for batch_offset in tqdm(range(0, len(docs), 32)):
-                batch_docs = docs[batch_offset : batch_offset + 32]
-                doc_inputs = self.tokenizer(
-                    batch_docs,
-                    truncation=True,
-                    max_length=self.max_length,
-                    padding=True,
-                    return_tensors="pt",
+            for batch_offset in tqdm(range(0, len(docs), self.batch_size)):
+                batch_docs = docs[batch_offset : batch_offset + self.batch_size]
+                inputs = self.tokenizer(
+                    batch_docs, padding=True, truncation=True, return_tensors="pt"
                 )
-                doc_inputs.to(self.device)
-                # print('input_ids:', doc_inputs['input_ids'].shape)
-                # print('attention_mask:', doc_inputs['attention_mask'].shape)
-                batch_passage_embedding = (
-                    self.encoder.body_emb(**doc_inputs).detach().cpu()
-                )
+                inputs.to(self.device)
+                embeddings = self.encoder(passage=inputs).p_reps
+                batch_passage_embedding = embeddings.detach().cpu()
                 passage_embedding = torch.cat(
                     (passage_embedding, batch_passage_embedding), dim=0
                 )
@@ -142,23 +124,20 @@ class PyTDenseIndexer(TransformerBase):
         return self.index_path
 
 
-class PyTDenseRetrieval(TransformerBase):
+class TevatronRetrieval(TransformerBase):
     def __init__(
         self,
         index_path: Path,
-        model_path: str = "k-ush/xlm-roberta-base-ance-en-jp-warmup",
+        model_path: str = "facebook/mcontriever",
         num_results=10000,
         device: str = "cuda:0",
         **kwargs,
     ):
         self.num_results = num_results
-        cache_path = "/home/kush/Projects/NTCIR17/transfer1/models/jance/.cache"
         self.model_path = model_path
         self.device = device
 
-        tokenizer, model = load_model(self.model_path)
-        self.tokenizer = tokenizer
-        self.encoder = model
+        self.encoder, self.tokenizer = load_tevatron_model(self.model_path)
 
         self.max_length = 512
         self.query_max_length = 64
@@ -219,15 +198,12 @@ class PyTDenseRetrieval(TransformerBase):
         qid2q = {qid: q for q, qid in zip(queries, topics["qid"].to_list())}
 
         print("***** inference of %d queries *****" % len(qid2q))
-        query_ids = self.tokenizer(
-            queries,
-            truncation=True,
-            max_length=self.max_length,
-            padding=True,
-            return_tensors="pt",
+        inputs = self.tokenizer(
+            queries, padding=True, truncation=True, return_tensors="pt"
         )
-        query_ids.to(self.device)
-        query_embedding = self.encoder.query_emb(**query_ids).detach().cpu()
+        inputs.to(self.device)
+        embeddings = self.encoder(query=inputs).q_reps
+        query_embeddings = embeddings.detach().cpu()
 
         print(
             "***** faiss search for %d queries on %d shards *****"
@@ -237,7 +213,7 @@ class PyTDenseRetrieval(TransformerBase):
         indexes_iter = self.yield_shard_indexes(self.shard_sizes, self.index_path)
         for passage_embs, offset in tqdm(indexes_iter, desc="Calc Scores"):
             scores, neighbours = self.calc_scores_with_faiss(
-                passage_embs, query_embedding
+                passage_embs, query_embeddings
             )
 
             res = self._calc_scores(
@@ -285,45 +261,3 @@ class PyTDenseRetrieval(TransformerBase):
         return pd.DataFrame(
             rtr, columns=["qid", "query", "docid", "docno", "rank", "score"]
         )
-
-
-class PyTDenseTextScorer(TransformerBase):
-    def __init__(
-        self, encoder: Any, text_field: str = "text", **kwargs: dict[Any, Any]
-    ) -> None:
-        self.encoder = encoder
-        self.text_field = text_field
-
-    def __str__(self) -> str:
-        return "PyTDenseTextScorer"
-
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        docs: list[dict[str, str]] = []
-        query_idxs: list[int] = []
-        idx_by_query: dict[str, int] = {}
-        queries: list[str] = []
-        for q in df["query"].to_list():
-            if q in idx_by_query:
-                query_idxs.append(idx_by_query[q])
-            else:
-                queries.append(q)
-                qidx = len(idx_by_query)
-                idx_by_query[q] = qidx
-                query_idxs.append(qidx)
-
-        docs = []
-        for d in df[self.text_field].to_list():
-            docs.append({"text": d})
-
-        query_embeddings = self.encoder.encode_queries(
-            queries, 16, convert_to_tensor=False
-        )
-
-        passage_embeddings = self.encoder.encode_corpus(
-            docs, 16, convert_to_tensor=False
-        )
-        query_embeddings = query_embeddings[query_idxs]
-
-        score_matrix = np.matmul(query_embeddings, passage_embeddings.T)
-        scores = np.diag(score_matrix)
-        return df.assign(score=scores)

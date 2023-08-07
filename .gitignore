@@ -167,3 +167,8 @@ indexes/**
 models/**
 runs/**
 testcollections/**
+script
+ntcir_datasets
+models/jance
+models/contriever/model
+src/models/contriever/model

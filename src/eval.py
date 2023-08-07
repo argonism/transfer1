@@ -1,18 +1,17 @@
-import json
+import logging
 import os
 import re
-import sys
 from importlib import reload
 from pathlib import Path
 
-import datasets.ntcir_transfer
-import ir_datasets
-import pandas as pd
+import ntcir_datasets.ntcir_transfer
 import pyterrier as pt
-from models.jance.jance import PyTDenseIndexer, PyTDenseRetrieval
+from models.loader import LoadRetriever
 from pyterrier.datasets import Dataset
 from pyterrier.measures import nDCG
+from pyterrier.transformer import TransformerBase
 from sudachipy import dictionary, tokenizer
+from utils import is_debug, project_dir
 
 JAVA_HOME = "/usr/lib/jvm/default"
 os.environ["JAVA_HOME"] = JAVA_HOME
@@ -26,7 +25,8 @@ class Evaluator(object):
         self,
         dataset: Dataset,
         sudachi_tokenizer: tokenizer.Tokenizer,
-        index_path: Path,
+        indexer: TransformerBase,
+        retriever: TransformerBase,
         run_path: Path,
         run_name: str = "kasys",
         tokenizer_mode: str = tokenizer.Tokenizer.SplitMode.A,
@@ -34,7 +34,9 @@ class Evaluator(object):
         self.dataset = dataset
         self.sudachi_tokenizer = sudachi_tokenizer
         self.tokenizer_mode = tokenizer_mode
-        self.index_path = index_path
+        self.indexer = indexer
+        self.retriever = retriever
+
         self.run_path = run_path
         self.run_name = run_name
 
@@ -60,46 +62,51 @@ class Evaluator(object):
         for i, doc in enumerate(self.dataset.get_corpus_iter(verbose=False)):
             doc["text"] = self.tokenize_text(doc["text"])
             yield doc
+            if is_debug() and i < 100:
+                break
 
-    def index(self):
-        indexer = pt.IterDictIndexer(str(self.index_path))
-        indexer.setProperty("tokeniser", "UTFTokeniser")
-        indexer.setProperty("termpipelines", "")
-        if not self.index_path.joinpath("shards.pkl").exists():
-            jance_indexer = PyTDenseIndexer(self.index_path, verbose=False)
-            index_path = jance_indexer.index(self.train_doc_generate())
-            return index_path
-        return str(self.index_path)
+    def index(self) -> str:
+        index_path = self.indexer.index(self.train_doc_generate())
+        return str(index_path)
 
     def eval_on_dev(self):
-        index_path = self.index()
-        index_path = Path(index_path)
-        if not index_path.exists():
-            index_path.mkdir(parents=True)
-
-        anceretr = PyTDenseRetrieval(index_path)
+        self.index()
 
         return pt.Experiment(
-            [anceretr],
+            [self.retriever],
             self.tokenize_topics(self.dataset),
             self.dataset.get_qrels(),
-            eval_metrics=[nDCG],
+            eval_metrics=[nDCG @ 1000],
             names=[self.run_name],
-            save_dir=self.run_path,
+            save_dir=str(self.run_path),
             save_mode="overwrite",
         )
 
 
 def main():
-    dataset_pt = pt.get_dataset("irds:ntcir-transfer/1/train")
+    dataset_name = "ntcir-transfer/1/dev"
+    # model_name = "contriever-msmarco"
+    model_name = "contriever-mrtidy"
+    # model_name = "contriever-transfer"
+    # model_name = "tevatron-contriever-mrtidy"
+
+    dataset_pt = pt.get_dataset(f"irds:{dataset_name}")
     sudachi_tokenizer = dictionary.Dictionary().create()
     mode = tokenizer.Tokenizer.SplitMode.A
+
+    indexer, retriever = LoadRetriever(dataset_name, model_name).load_retriever()
+
+    run_path = project_dir.joinpath("runs/ntcir17-transfer", model_name)
+    if not run_path.exists():
+        run_path.mkdir(parents=True)
 
     evaluator = Evaluator(
         dataset_pt,
         sudachi_tokenizer,
-        Path("../indexes/ntcir17-transfer/debug/jance"),
-        "../runs/ntcir17-transfer/jance",
+        indexer,
+        retriever,
+        run_path,
+        run_name=model_name,
         tokenizer_mode=mode,
     )
     eval_result = evaluator.eval_on_dev()
@@ -107,4 +114,5 @@ def main():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()
