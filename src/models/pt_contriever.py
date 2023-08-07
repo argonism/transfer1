@@ -7,6 +7,8 @@ from collections import defaultdict
 from logging import getLogger
 from pathlib import Path
 from typing import Any, Generator, Iterable, List, Optional, Union
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import faiss
 import more_itertools
@@ -44,6 +46,22 @@ def load_contriever(
     encoder.eval()
     return encoder, tokenizer
 
+def index_with_multiprocessing(docs, encoder, tokenizer, batch_size, device, shard_file_path: Path):
+    passage_embedding = torch.tensor([])
+    for batch_offset in tqdm(range(0, len(docs), batch_size)):
+        batch_docs = docs[batch_offset : batch_offset + batch_size]
+        inputs = tokenizer(
+            batch_docs, padding=True, truncation=True, return_tensors="pt"
+        )
+        inputs.to(device)
+        embeddings = encoder(**inputs)
+        batch_passage_embedding = embeddings.detach().cpu()
+        passage_embedding = torch.cat(
+            (passage_embedding, batch_passage_embedding), dim=0
+        )
+
+    shard_file_path.write_bytes(pickle.dumps(passage_embedding))
+    return len(docs)
 
 class ContrieverIndexer(TransformerBase):
     def __init__(
@@ -54,7 +72,7 @@ class ContrieverIndexer(TransformerBase):
         verbose: bool = True,
         segment_size: int = 500_000,
         device: str = "cuda:0",
-        batch_size: int = 16,
+        batch_size: int = 8,
         overwrite: bool = False,
         **kwargs,
     ) -> None:
@@ -76,13 +94,13 @@ class ContrieverIndexer(TransformerBase):
         self.batch_size = batch_size
         self.overwrite = overwrite
 
+        self.max_workers = 4
+
     def index(self, generator):
         if not self.overwrite and self.index_path.joinpath("shards.pkl").exists():
             return self.index_path
 
         os.makedirs(self.index_path, exist_ok=True)
-
-        docid2docno = []
 
         def gen_tokenize():
             kwargs = {}
@@ -93,36 +111,31 @@ class ContrieverIndexer(TransformerBase):
                 if self.verbose
                 else generator
             ):
-                docid2docno.append(doc["docno"])
+                yield (doc["docno"], doc["text"])
 
-                yield doc["text"]
-
-        segment = -1
+        segment = 0
         shard_size = []
-        for docs in more_itertools.ichunked(gen_tokenize(), self.segment_size):
-            segment += 1
+        with ProcessPoolExecutor(max_workers=self.max_workers, mp_context=mp.get_context('spawn')) as executor:
+            for docs in tqdm(more_itertools.ichunked(gen_tokenize(), self.segment_size)):
+                print("Segment %d" % segment)
 
-            print("Segment %d" % segment)
-            docs = list(docs)
-            passage_embedding = torch.tensor([])
-            for batch_offset in tqdm(range(0, len(docs), self.batch_size)):
-                batch_docs = docs[batch_offset : batch_offset + self.batch_size]
-                inputs = self.tokenizer(
-                    batch_docs, padding=True, truncation=True, return_tensors="pt"
-                )
-                inputs.to(self.device)
-                embeddings = self.encoder(**inputs)
-                batch_passage_embedding = embeddings.detach().cpu()
-                passage_embedding = torch.cat(
-                    (passage_embedding, batch_passage_embedding), dim=0
-                )
+                futures = []
+                for docs_chunk in more_itertools.chunked(docs, self.max_workers):
 
-            shard_file_path = self.index_path.joinpath(str(segment) + ".pkl")
-            shard_file_path.write_bytes(pickle.dumps(passage_embedding))
+                    device = f"cuda:{segment}"
+                    encoder, tokenizer = load_contriever(self.model_path, device=device)
+                    shard_file_path = self.index_path.joinpath(str(segment) + ".pkl")
+                    future = executor.submit(index_with_multiprocessing, docs_chunk, encoder, tokenizer, self.batch_size, device, shard_file_path)
+                    futures.append(future)
 
-            passage_embedding = None
+                logger.info("waiting all process completed...")
+                writed_docs_sum = 0
+                for future in as_completed(futures):
+                    for docs_len in future.result():
+                        writed_docs_sum += docs_len
 
-            shard_size.append(len(docs))
+                shard_size.append(writed_docs_sum)
+                segment += 1
 
         with pt.io.autoopen(os.path.join(self.index_path, "shards.pkl"), "wb") as f:
             pickle.dump(shard_size, f)
