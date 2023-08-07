@@ -1,3 +1,0 @@
-[submodule "src/models/contriever"]
-	path = src/models/contriever
-	url = https://github.com/argonism/contriever.git
