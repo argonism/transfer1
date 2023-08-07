@@ -4,13 +4,14 @@ import re
 from importlib import reload
 from pathlib import Path
 
-import ntcir_datasets.ntcir_transfer
 import pyterrier as pt
-from models.loader import LoadRetriever
 from pyterrier.datasets import Dataset
-from pyterrier.measures import nDCG
+from pyterrier.measures import MRR, R, nDCG
 from pyterrier.transformer import TransformerBase
 from sudachipy import dictionary, tokenizer
+
+import ntcir_datasets.ntcir_transfer
+from models.loader import LoadRetriever
 from utils import is_debug, project_dir
 
 JAVA_HOME = "/usr/lib/jvm/default"
@@ -76,7 +77,7 @@ class Evaluator(object):
             [self.retriever],
             self.tokenize_topics(self.dataset),
             self.dataset.get_qrels(),
-            eval_metrics=[nDCG @ 1000],
+            eval_metrics=[nDCG, nDCG@10, nDCG@100, nDCG @ 1000, R @ 100, ],
             names=[self.run_name],
             save_dir=str(self.run_path),
             save_mode="overwrite",
@@ -85,8 +86,8 @@ class Evaluator(object):
 
 def main():
     dataset_name = "ntcir-transfer/1/dev"
-    # model_name = "contriever-msmarco"
-    model_name = "contriever-mrtidy"
+    model_name = "contriever-msmarco"
+    # model_name = "contriever-mrtidy"
     # model_name = "contriever-transfer"
     # model_name = "tevatron-contriever-mrtidy"
 
