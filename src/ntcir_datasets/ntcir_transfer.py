@@ -27,7 +27,10 @@ def _init():
     
     # Specify where to find the content. Here it's just from the repository, but it could be anywhere.
     TC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../')
-    DL_DOCS_TRAIN = ir_datasets.util.LocalDownload(TC_ROOT + '/testcollections/ntcir/NTCIR-1/mlir/ntc1-j1.utf8.jsonl')
+    DL_DOCS = ir_datasets.util.LocalDownload(TC_ROOT + '/testcollections/ntcir/NTCIR-1/mlir/ntc1-j1.utf8.jsonl')
+    DL_QUERIES= ir_datasets.util.LocalDownload(TC_ROOT + '/testcollections/ntcir/NTCIR-1/topics/topic0001-0083.utf8.jsonl')
+    DL_QREL = ir_datasets.util.LocalDownload(TC_ROOT + '/testcollections/ntcir/NTCIR-1/mlir/rel2_ntc1-j1_0001-0083.utf8.tsv')
+    
     DL_QUERIES_TRAIN = ir_datasets.util.LocalDownload(TC_ROOT + '/testcollections/ntcir/NTCIR-1/topics/topic0031-0083.utf8.jsonl')
     DL_QRELS_TRAIN = ir_datasets.util.LocalDownload(TC_ROOT + '/testcollections/ntcir/NTCIR-1/mlir/rel2_ntc1-j1_0031-0083.utf8.tsv')
     DL_TOP1000_TRAIN = ir_datasets.util.LocalDownload(TC_ROOT + '/testcollections/ntcir/NTCIR-1/mlir/top1000.train.tsv')
@@ -43,14 +46,19 @@ def _init():
     subsets = {}
 
     # Dataset definition: it provides docs, queries, and qrels
+    subsets['1/all'] = ir_datasets.Dataset(
+        JsonlDocs(ir_datasets.util.Cache(DL_DOCS, base_path/'ntc1-j1.utf8.jsonl')),
+        JsonlQueries(ir_datasets.util.Cache(DL_QUERIES, base_path/'topic0001-0083.utf8.jsonl')),
+        TrecQrels(ir_datasets.util.Cache(DL_QREL, base_path/'rel2_ntc1-j1_0001-0083.utf8.tsv'), QREL_DEFS_TRAIN),
+    )
     subsets['1/train'] = ir_datasets.Dataset(
-        JsonlDocs(ir_datasets.util.Cache(DL_DOCS_TRAIN, base_path/'ntc1-j1.utf8.jsonl')),
+        JsonlDocs(ir_datasets.util.Cache(DL_DOCS, base_path/'ntc1-j1.utf8.jsonl')),
         JsonlQueries(ir_datasets.util.Cache(DL_QUERIES_TRAIN, base_path/'topic0031-0083.utf8.jsonl')),
         TrecQrels(ir_datasets.util.Cache(DL_QRELS_TRAIN, base_path/'rel2_ntc1-j1_0031-0083.utf8.tsv'), QREL_DEFS_TRAIN),
         TrecScoredDocs(ir_datasets.util.Cache(DL_TOP1000_TRAIN, base_path/'top1000.train.tsv')),
     )
     subsets['1/dev'] = ir_datasets.Dataset(
-        JsonlDocs(ir_datasets.util.Cache(DL_DOCS_TRAIN, base_path/'ntc1-j1.utf8.jsonl')),
+        JsonlDocs(ir_datasets.util.Cache(DL_DOCS, base_path/'ntc1-j1.utf8.jsonl')),
         JsonlQueries(ir_datasets.util.Cache(DL_QUERIES_DEV, base_path/'topic0001-0030.utf8.jsonl')),
         TrecQrels(ir_datasets.util.Cache(DL_QRELS_DEV, base_path/'rel2_ntc1-j1_0001-0030.utf8.tsv'), QREL_DEFS_TRAIN),
         TrecScoredDocs(ir_datasets.util.Cache(DL_TOP1000_DEV, base_path/'top1000.train.tsv')),
