@@ -35,10 +35,7 @@ def load_contriever(
         logger.info(f"loading contriever from {model_path}")
         tokenizer = AutoTokenizer.from_pretrained("facebook/mcontriever-msmarco")
         encoder = Contriever.from_pretrained(model_path)
-        # retriever, tokenizer, retriever_model_id = load_retriever(str(model_path))
-        # logger.info(f"retriever_model_id: {retriever_model_id}")
-        # tokenizer = tokenizer
-        # encoder = retriever
+
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         encoder = Contriever.from_pretrained(model_path)
@@ -46,7 +43,9 @@ def load_contriever(
     encoder.eval()
     return encoder, tokenizer
 
-def index_with_multiprocessing(docs, encoder, tokenizer, batch_size, device, shard_file_path: Path):
+def index_with_multiprocessing(docs_iter, model_path, batch_size, device, order: int):
+    docs = list(docs_iter)
+    encoder, tokenizer = load_contriever(model_path, device=device)
     passage_embedding = torch.tensor([])
     for batch_offset in tqdm(range(0, len(docs), batch_size)):
         batch_docs = docs[batch_offset : batch_offset + batch_size]
@@ -60,8 +59,7 @@ def index_with_multiprocessing(docs, encoder, tokenizer, batch_size, device, sha
             (passage_embedding, batch_passage_embedding), dim=0
         )
 
-    shard_file_path.write_bytes(pickle.dumps(passage_embedding))
-    return len(docs)
+    return (order, passage_embedding)
 
 class ContrieverIndexer(TransformerBase):
     def __init__(
@@ -70,7 +68,7 @@ class ContrieverIndexer(TransformerBase):
         model_path: str = "facebook/mcontriever",
         num_docs: Optional[int] = None,
         verbose: bool = True,
-        segment_size: int = 500_000,
+        segment_size: int = 1_000_000,
         device: str = "cuda:0",
         batch_size: int = 8,
         overwrite: bool = False,
@@ -102,6 +100,7 @@ class ContrieverIndexer(TransformerBase):
 
         os.makedirs(self.index_path, exist_ok=True)
 
+        docid2docno = []
         def gen_tokenize():
             kwargs = {}
             if self.num_docs is not None:
@@ -111,35 +110,53 @@ class ContrieverIndexer(TransformerBase):
                 if self.verbose
                 else generator
             ):
-                yield (doc["docno"], doc["text"])
+                docid2docno.append(doc["docno"])
+                yield doc["text"]
 
         segment = 0
         shard_size = []
         with ProcessPoolExecutor(max_workers=self.max_workers, mp_context=mp.get_context('spawn')) as executor:
             for docs in tqdm(more_itertools.ichunked(gen_tokenize(), self.segment_size)):
-                print("Segment %d" % segment)
+                logger.info("Segment %d" % segment)
+                docs = list(docs)
 
                 futures = []
-                for docs_chunk in more_itertools.chunked(docs, self.max_workers):
+                for i, docs_iter in enumerate(more_itertools.divide(self.max_workers, docs)):
 
-                    device = f"cuda:{segment}"
-                    encoder, tokenizer = load_contriever(self.model_path, device=device)
-                    shard_file_path = self.index_path.joinpath(str(segment) + ".pkl")
-                    future = executor.submit(index_with_multiprocessing, docs_chunk, encoder, tokenizer, self.batch_size, device, shard_file_path)
+                    device = f"cuda:{i}"
+                    
+                    future = executor.submit(
+                        index_with_multiprocessing,
+                        docs_iter,
+                        self.model_path,
+                        self.batch_size,
+                        device,
+                        i
+                    )
                     futures.append(future)
 
                 logger.info("waiting all process completed...")
-                writed_docs_sum = 0
-                for future in as_completed(futures):
-                    for docs_len in future.result():
-                        writed_docs_sum += docs_len
+                results = []
+                for future in tqdm(as_completed(futures)):
+                    order, passage_embedding_chunk = future.result()
+                    results.append((order, passage_embedding_chunk))
+            
+                passage_embeddings = torch.tensor([])
+                for order, passage_embedding_chunk in sorted(results, key=lambda x:x[0]):
+                    passage_embeddings = torch.cat(
+                        (passage_embeddings, passage_embedding_chunk), dim=0
+                    )
 
-                shard_size.append(writed_docs_sum)
+                shard_file_path = self.index_path.joinpath(str(segment) + ".pkl")
+                shard_file_path.write_bytes(pickle.dumps(passage_embeddings))
+
                 segment += 1
+                shard_size.append(len(docs))
 
         with pt.io.autoopen(os.path.join(self.index_path, "shards.pkl"), "wb") as f:
             pickle.dump(shard_size, f)
             pickle.dump(docid2docno, f)
+        logger.info(f"done indexing. index at {self.index_path}")
         return self.index_path
 
 
@@ -178,6 +195,8 @@ class ContrieverRetrieval(TransformerBase):
             tqdm(shard_sizes, desc="Loading shards", unit="shard")
         ):
             shard_path = index_path.joinpath(str(i) + ".pkl")
+            logger.info(f"loading shard at {i} from {shard_path}")
+
             passage_embs = pickle.loads(shard_path.read_bytes())
 
             yield passage_embs, offset
@@ -246,6 +265,7 @@ class ContrieverRetrieval(TransformerBase):
                 offset=offset,
             )
             rtr.append(res)
+
         rtr = pd.concat(rtr)
         rtr = add_ranks(rtr)
         rtr = rtr[rtr["rank"] < self.num_results]
