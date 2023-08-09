@@ -9,16 +9,14 @@ from pyterrier.datasets import Dataset
 from pyterrier.measures import MRR, R, nDCG
 from pyterrier.transformer import TransformerBase
 from sudachipy import dictionary, tokenizer
+import pandas as pd
 
 import ntcir_datasets.ntcir_transfer
 from models.loader import LoadRetriever
 from utils import is_debug, project_dir
 
-JAVA_HOME = "/usr/lib/jvm/default"
-os.environ["JAVA_HOME"] = JAVA_HOME
-
 if not pt.started():
-    pt.init(tqdm="notebook")
+    pt.init()
 
 
 class Evaluator(object):
@@ -83,12 +81,31 @@ class Evaluator(object):
             save_mode="overwrite",
         )
 
+    def eval_on_eval(self):
+        def gen_dummy_qrels():
+            dummy_qrels = pd.DataFrame(self.dataset.get_topics(), columns=['qid'])
+            dummy_qrels['docno'] = 'docno'
+            dummy_qrels['label'] = 0
+            return dummy_qrels
+
+        self.index()
+
+        return pt.Experiment(
+            [self.retriever],
+            self.tokenize_topics(self.dataset),
+            gen_dummy_qrels(),
+            eval_metrics=[nDCG, nDCG@10, nDCG@100, nDCG @ 1000, R @ 100, ],
+            names=[self.run_name],
+            save_dir=str(self.run_path),
+            save_mode="overwrite",
+        )
+
 
 def main():
     dataset_name = "ntcir-transfer/1/dev"
-    model_name = "contriever-msmarco"
+    # model_name = "contriever-msmarco"
     # model_name = "contriever-mrtidy"
-    # model_name = "contriever-transfer"
+    model_name = "contriever-transfer"
     # model_name = "tevatron-contriever-mrtidy"
 
     dataset_pt = pt.get_dataset(f"irds:{dataset_name}")
@@ -97,7 +114,7 @@ def main():
 
     indexer, retriever = LoadRetriever(dataset_name, model_name).load_retriever()
 
-    run_path = project_dir.joinpath("runs/ntcir17-transfer", model_name)
+    run_path = project_dir.joinpath("runs/ntcir17-transfer/dev", model_name)
     if not run_path.exists():
         run_path.mkdir(parents=True)
 
@@ -113,7 +130,37 @@ def main():
     eval_result = evaluator.eval_on_dev()
     print(eval_result)
 
+def gen_runs():
+    dataset_name = "ntcir-transfer/1/eval"
+    model_name = "contriever-msmarco"
+    # model_name = "contriever-mrtidy"
+    # model_name = "contriever-transfer"
+    # model_name = "tevatron-contriever-mrtidy"
+
+    dataset_pt = pt.get_dataset(f"irds:{dataset_name}")
+    sudachi_tokenizer = dictionary.Dictionary().create()
+    mode = tokenizer.Tokenizer.SplitMode.A
+
+    indexer, retriever = LoadRetriever(dataset_name, model_name).load_retriever()
+
+    run_path = project_dir.joinpath("runs/ntcir17-transfer/eval", model_name)
+    if not run_path.exists():
+        run_path.mkdir(parents=True)
+
+    evaluator = Evaluator(
+        dataset_pt,
+        sudachi_tokenizer,
+        indexer,
+        retriever,
+        run_path,
+        run_name=model_name,
+        tokenizer_mode=mode,
+    )
+    eval_result = evaluator.eval_on_eval()
+    print(eval_result)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    main()
+    # main()
+    gen_runs()
